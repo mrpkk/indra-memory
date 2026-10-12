@@ -1,82 +1,50 @@
-# indra-memory — долговременная память агента
+# indra-memory
 
-## Какую проблему решает
+Long-term memory for AI agents, in SQLite, outside the context window.
 
-Агент между сессиями **теряет всё**. Не потому что плохо запоминает, а потому
-что память, живущая в контексте, деградирует на длине: модель физически не
-видит начало разговора. Измерено живьём 06.10.2026: **факт, не записанный в
-файл, теряется между сессиями в 100% случаев. Пять голосов из пяти назвали
-память болью №1.**
+## The problem
 
-Эта память устроена иначе: факты лежат **вне контекста**, в SQLite с
-полнотекстовым индексом. В контекст попадает только выборка по релевантности.
+Context-bound memory degrades with length. The model physically cannot see the
+start of its own conversation, so everything "remembered" is really just a
+file. Facts, decisions and agreements live in a window and are lost.
 
-## Почему она НЕ деградирует
+This is built the other way around: facts live **outside** the context in
+SQLite with a full-text index, and only a relevance-ranked sample enters the
+prompt. The length of the conversation stops being the limit on memory.
 
-Не «почти не деградирует» — не деградирует по построению.
+## Properties a flat JSON file does not have
 
-| Обычная память | Здесь |
-|---|---|
-| Читать всё подряд | Поиск по FTS5, в контекст идёт выборка |
-| Бюджет растёт с накоплением | **Бюджет жёсткий** — сколько фактов ни накопилось, влезает ровно заданное |
-| Знание теряется со временем | Переоценка по свежести: `свежесть = 1.2 / (1 + возраст_дней/30)` |
-| Старое знание молча врёт | **Версии:** новый факт помечает старый `superseded`, история не переписывается |
+- **Full-text search** — recall by relevance, not by key
+- **Supersede, not overwrite** — a corrected fact does not erase the old one;
+  it replaces it while both stay retrievable
+- **Links between facts** — related facts are neighbours, not strings
+- **Token-budgeted packing** — exactly as much context as fits, no more
+- **Importance** — not every fact deserves a slot in the prompt
 
-**Замер: база выросла с 20 до 3 020 фактов (×151) — выдача на тот же запрос
-идентична.** Поиск по 5 000 фактов: 0,0004 с.
+## Try it
 
-## Четыре свойства, которых нет у плоского JSON
+```
+curl -X POST https://rta.lat/memory/remember \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"the user prefers Russian","tags":["pref"]}'
 
-1. **Поиск по всем словам**, а не по тегу. Русская морфология учтена:
-   токенизатор trigram, запрос сводится к префиксу — «дво» находит
-   «двойная», «двойной», «двойные».
-2. **Версии.** `supersede` не затирает, а помечает. Через полгода видно,
-   что было раньше и когда поменялось. Плоская память эту возможность теряет,
-   и через полгода становится ложью.
-3. **Связи.** `attest — закрывает → слой доверия`. Поиск тянет соседей:
-   без связей знание не переиспользуется.
-4. **Важность и свежесть** в ранжировании, 1–5 вручную.
-
-## Установка и запуск
-
-```bash
-pip install -e .
-memory remember "факт" --tags важное --importance 5
-memory recall "мост" --with-links
-memory pack "мост" --tokens 800        # контекст под бюджет
-memory supersede 5 "новый текст"      # обновить без потери истории
-memory link 12 закрывает 3            # связать факты
-memory stats
+curl 'https://rta.lat/memory/recall?q=language'
+curl  https://rta.lat/memory/stats
+curl -X POST https://rta.lat/memory/forget -d '{"id":1}'
 ```
 
-## Как агент это использует
+## The measurement behind it
 
-В начале каждой задачи агент вызывает `pack` с текстом задачи и получает
-релевантные факты вместе со связями. Это происходит **автоматически в
-автопилоте** — сессия не начинается с нуля.
+The design follows a measurement, not an intuition. Across five independent
+model runs, loss of facts between sessions came up as the top pain every time
+— 5 out of 5. The reason is structural, not a matter of model quality.
 
-## Тесты
+That measurement is in the repository as well; the point is that the decision
+to build this had evidence behind it.
 
-```bash
-python3 -m pytest test_memory.py -q     # 28 passed
-```
+## Public repo
 
-В тестах есть главная проверка свойства: `test_pack_respects_token_budget`
-кладёт 400 фактов и требует, чтобы при бюджетах 100/300/800/2000 токенов
-выдача не превышала заданное.
+<https://github.com/mrpkk/indra-memory>
 
-## Честные ограничения
-
-- **Термы короче 3 символов не ищутся** через FTS — идут через LIKE. Это
-  плата за trigram-токенизатор, который дал русскую морфологию.
-- **Нет семантического поиска** — только лексический. По смыслу не найдёт.
-- **Ранжирование линейное**, без учёта связности графа при оценке.
-- **База растёт без автоочистки.** Забытое помечается `forgotten`, но
-  физически остаётся.
-
-## Доказательство отката
-
-Защита от яда в ключах доказана откатом: выключаешь сканирование имён полей —
-`test_poison_in_field_name_rejected` падает. Включаешь — 28 тестов зелёные.
-
-**Критерий «готово» — исполненная команда с выводом, а не обещание.**
+Part of the Indra set — six small services for agents that have to be
+trusted: <https://indra.rta.lat>
