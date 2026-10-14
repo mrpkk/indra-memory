@@ -79,6 +79,36 @@ def _tags(raw: object) -> str:
     raise ValueError("tags должны быть строкой или списком строк")
 
 
+def _base_url() -> str:
+    """Публичный адрес: в sitemap обязаны быть абсолютные URL."""
+    import os
+    return os.environ.get("INDRA_MEMORY_BASE_URL", "https://rta.lat/memory").rstrip("/")
+
+
+def _robots() -> str:
+    """Краулеров пускаем: индексация витрины — это трафик."""
+    return ("User-agent: *\n"
+            "Allow: /\n"
+            "Disallow: /mcp\n"
+            f"Sitemap: {_base_url()}/sitemap.xml\n")
+
+
+def _sitemap() -> str:
+    """Карта сайта: документы, а не endpoints.
+
+    `/subscribe`, `/quote`, `/check` сюда не идут — их индексация
+    бессмысленна, это машиночитаемые адреса.
+    """
+    base = _base_url()
+    urls = "".join(
+        f"<url><loc>{base}{page}</loc></url>"
+        for page in ('/', '/health', '/recall')
+    )
+    return ('<?xml version="1.0" encoding="UTF-8"?>'
+            '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+            f"{urls}</urlset>")
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "indra-memory"
 
@@ -115,6 +145,10 @@ class Handler(BaseHTTPRequestHandler):
                 break
         conn = memory.connect()
         try:
+            if path == "/robots.txt":
+                self._send(200, _robots())
+            elif path == "/sitemap.xml":
+                self._send(200, _sitemap())
             if path == "/":
                 self._send(200, LANDING)
             elif path == "/health":
