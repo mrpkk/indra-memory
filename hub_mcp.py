@@ -109,18 +109,48 @@ async def hub_stats() -> str:
     return _json(out)
 
 
-async def main() -> None:
+async def _stdio() -> None:
+    await mcp.run_stdio_async()
+
+
+def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--http", type=int, default=0, help="порт streamable-http (0 = stdio)")
+    ap.add_argument("--http", action="store_true", help="режим streamable-http (иначе stdio)")
     ap.add_argument("--host", default=os.environ.get("HOST", "127.0.0.1"))
-    ap.add_argument("--http-path", default="/mcp")
+    ap.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8193") or 8193))
+    ap.add_argument("--http-path", default="/hub/mcp",
+                    help="путь MCP под префиксом туннеля (путь не срезается)")
     args = ap.parse_args()
-    if args.http:
-        await mcp.run(transport="streamable-http", port=args.http, host=args.host,
-                      streamable_http_path=args.http_path)
-    else:
-        await mcp.run_stdio_async()
+    if not args.http:
+        asyncio.run(_stdio())
+        return
+
+    import uvicorn
+    from mcp.server.transport_security import TransportSecuritySettings
+    from starlette.middleware.base import BaseHTTPMiddleware
+    from starlette.responses import JSONResponse
+
+    app = mcp.streamable_http_app(
+        streamable_http_path=args.http_path,
+        transport_security=TransportSecuritySettings(
+            allowed_hosts=["127.0.0.1", "127.0.0.1:*", "localhost", "localhost:*",
+                           "rta.lat", "*.rta.lat"]))
+
+    token = os.environ.get("HUB_TOKEN")
+    if token:
+        class BearerAuth(BaseHTTPMiddleware):
+            """Хаб наружу — только по токену: иначе любой может набить очередь."""
+
+            async def dispatch(self, request, call_next):
+                if request.headers.get("authorization") != f"Bearer {token}":
+                    return JSONResponse({"error": "unauthorized"}, status_code=401)
+                return await call_next(request)
+
+        app.add_middleware(BearerAuth)
+
+    # uvicorn.run() нельзя звать из работающего event loop — поэтому main синхронный
+    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
